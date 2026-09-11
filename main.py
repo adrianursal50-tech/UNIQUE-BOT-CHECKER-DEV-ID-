@@ -53,7 +53,7 @@ logger.setLevel(logging.INFO)
 # ============================================================
 # CONFIG
 # ============================================================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8728762913:AAGjtUiPLsUrN1KXjWS7rEAi1wwZefk9rFA").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8728762913:AAFdnTyiBUuhZiwGQ1FxgbgSb9Y_B1HovXY").strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8621676055") or 0)
 
 PRICE_CREATION = int(os.environ.get("PRICE_CREATION", "10"))
