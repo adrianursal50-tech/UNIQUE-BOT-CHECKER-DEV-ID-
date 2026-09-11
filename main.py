@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-MLBB Telegram Bot — production build for Railway.
+MLBB Telegram Bot â€” production build for Railway.
 Primary profile source: https://mlbbbbv2.onrender.com/lookup
-(Falls back to CN31 + other public APIs if it's down.)
+Bulk check with live stats (valid, invalid, banned, highest level, highest skins).
 """
 
 import os
@@ -53,8 +53,8 @@ logger.setLevel(logging.INFO)
 # ============================================================
 # CONFIG
 # ============================================================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8728762913:AAGjtUiPLsUrN1KXjWS7rEAi1wwZefk9rFA").strip()
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "8621676055") or 0)
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
 
 PRICE_CREATION = int(os.environ.get("PRICE_CREATION", "10"))
 PRICE_BAN = int(os.environ.get("PRICE_BAN", "10"))
@@ -85,22 +85,14 @@ LANGUAGE = os.environ.get("LANGUAGE", "en")
 AES_KEY = bytes.fromhex("f5a193d50ade553e9835595f5cd75ddd")
 AES_IV = b"\x00" * 16
 
-# ============================================================
-# LOOKUP API — primary source (Render, cold-starts on 503)
-# ============================================================
+# Primary lookup API
 LOOKUP_API = os.environ.get("LOOKUP_API", "https://mlbbbbv2.onrender.com/lookup")
-LOOKUP_WAKE_URL = os.environ.get("LOOKUP_WAKE_URL", "https://mlbbbbv2.onrender.com/")
-LOOKUP_TIMEOUT = int(os.environ.get("LOOKUP_TIMEOUT", "90"))     # first call after cold start
-LOOKUP_RETRIES = int(os.environ.get("LOOKUP_RETRIES", "3"))      # 3 attempts with backoff
-LOOKUP_BACKOFF = float(os.environ.get("LOOKUP_BACKOFF", "10"))   # seconds between retries
-
-# Secondary fallbacks (only used if primary fails)
+LOOKUP_TIMEOUT = int(os.environ.get("LOOKUP_TIMEOUT", "30"))
 FALLBACK_LOOKUPS = [
     ("https://mlbbapi.onrender.com/lookup", "role_id"),
     ("https://mlbb-api.vercel.app/lookup", "role_id"),
 ]
 
-# CN31 token servers (for ban + profile when the primary lookup is down)
 CN31_SERVERS = [
     "https://solver-server-production.up.railway.app",
     "http://solver-server-production.up.railway.app",
@@ -114,9 +106,10 @@ CN31_SERVERS = [
 ]
 TOKEN_PATHS = ["/get-token", "/token", "/cookies", "/cn31", "/api/token", "/v1/token"]
 
-# In-process flag so we only "wake" the Render app once per cold-start window.
-_lookup_awake_until = 0.0
-_lookup_awake_lock = threading.Lock()
+# Bulk waiting state â€” admin user IDs that have called /bulk and are waiting to upload
+BULK_WAITING: set = set()
+BULK_WAIT_TIMEOUT_SEC = 300  # must upload within 5 min of /bulk
+_bulk_wait_ts: Dict[int, float] = {}
 
 
 # ============================================================
@@ -277,7 +270,7 @@ def load_proxies():
     global PROXY_LIST
     if not PROXIES_FILE.exists():
         PROXY_LIST = []
-        logger.warning(f"{PROXIES_FILE} not found — running without proxies.")
+        logger.warning(f"{PROXIES_FILE} not found â€” running without proxies.")
         return
     try:
         raw = [
@@ -569,30 +562,9 @@ class GameLogin:
 
 
 # ============================================================
-# LOOKUP API — PRIMARY SOURCE
+# LOOKUP API
 # ============================================================
-def _wake_lookup_service():
-    """
-    Poke the Render app so it starts up if it's cold.
-    Cached for 90s so we don't hammer it.
-    """
-    global _lookup_awake_until
-    with _lookup_awake_lock:
-        if time.time() < _lookup_awake_until:
-            return
-        try:
-            requests.get(LOOKUP_WAKE_URL, timeout=45)
-            logger.info(f"Woke lookup service at {LOOKUP_WAKE_URL}")
-        except Exception as e:
-            logger.debug(f"Wake request failed (will still try main call): {e}")
-        _lookup_awake_until = time.time() + 90
-
-
 def _extract_player(data: any) -> Optional[Dict]:
-    """
-    Find the first dict in the response that looks like a player profile.
-    Handles many shapes: {data:{...}}, {player_data:{...}}, {result:{...}}, [...], etc.
-    """
     if not data:
         return None
     if isinstance(data, list):
@@ -603,13 +575,9 @@ def _extract_player(data: any) -> Optional[Dict]:
         return None
     if not isinstance(data, dict):
         return None
-
-    # direct
     for key in ("nickname", "name", "username", "ign"):
         if data.get(key):
             return data
-
-    # nested
     for key in ("data", "result", "player", "player_data", "account", "profile"):
         nested = data.get(key)
         if nested:
@@ -620,12 +588,6 @@ def _extract_player(data: any) -> Optional[Dict]:
 
 
 def fetch_profile_from_lookup_api(account_id: int, zone_id: int) -> Dict:
-    """
-    Query LOOKUP_API (https://mlbbbbv2.onrender.com/lookup).
-    Tries multiple param shapes and retries on 503 (Render cold start).
-    """
-    _wake_lookup_service()
-
     param_sets = [
         {"role_id": str(account_id), "zone_id": str(zone_id)},
         {"uid": str(account_id), "zone_id": str(zone_id)},
@@ -633,55 +595,38 @@ def fetch_profile_from_lookup_api(account_id: int, zone_id: int) -> Dict:
         {"role_id": str(account_id), "zone": str(zone_id)},
         {"user_id": str(account_id), "zone_id": str(zone_id)},
     ]
-
     last_error = "unknown"
-    for attempt in range(1, LOOKUP_RETRIES + 1):
-        for params in param_sets:
+    for params in param_sets:
+        try:
+            r = requests.post(
+                LOOKUP_API,
+                json=params,
+                timeout=LOOKUP_TIMEOUT,
+                proxies=get_proxy(),
+            )
+            if r.status_code != 200:
+                last_error = f"HTTP {r.status_code}"
+                continue
             try:
-                # First attempt uses a long timeout (cold start);
-                # subsequent attempts are shorter.
-                timeout = LOOKUP_TIMEOUT if attempt == 1 else 20
-                r = requests.post(
-                    LOOKUP_API,
-                    json=params,
-                    timeout=timeout,
-                    proxies=get_proxy(),
-                )
-
-                if r.status_code == 503:
-                    last_error = "503 (service cold-starting)"
-                    logger.info(f"Lookup 503 — sleeping {LOOKUP_BACKOFF}s then retrying")
-                    time.sleep(LOOKUP_BACKOFF)
-                    break  # retry whole param list
-
-                if r.status_code != 200:
-                    last_error = f"HTTP {r.status_code}"
-                    continue
-
-                try:
-                    data = r.json()
-                except ValueError:
-                    last_error = f"non-JSON response: {r.text[:80]!r}"
-                    continue
-
-                p = _extract_player(data)
-                if p:
-                    return {"success": True, "data": p, "source": f"{LOOKUP_API} ({list(params)[0]})"}
-
-                last_error = f"no player fields in response: {str(data)[:120]}"
-
-            except requests.Timeout:
-                last_error = "request timed out (cold start?)"
+                data = r.json()
+            except ValueError:
+                last_error = f"non-JSON: {r.text[:80]!r}"
                 continue
-            except Exception as e:
-                last_error = f"{type(e).__name__}: {str(e)[:80]}"
-                continue
-
+            p = _extract_player(data)
+            if p:
+                return {"success": True, "data": p, "source": f"{LOOKUP_API} ({list(params)[0]})"}
+            last_error = f"no player fields: {str(data)[:120]}"
+        except requests.Timeout:
+            last_error = "timeout"
+            continue
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {str(e)[:80]}"
+            continue
     return {"success": False, "error": f"lookup API failed: {last_error}"}
 
 
 # ============================================================
-# CN31 TOKEN / BAN (kept as fallback for profile & ban)
+# CN31 TOKEN / BAN
 # ============================================================
 def fetch_cn31_token() -> Optional[str]:
     for server in CN31_SERVERS:
@@ -753,19 +698,10 @@ def check_ban_real(account_id: int, zone_id: int, token: Optional[str]) -> Dict:
 
 
 def fetch_account_info(account_id: int, zone_id: int, token: Optional[str]) -> Dict:
-    """
-    PRIMARY: LOOKUP_API (mlbbbbv2.onrender.com).
-    FALLBACK: CN31 profile endpoints.
-    FALLBACK 2: other public lookup APIs.
-    """
-    # --- 1) Primary: mlbbbbv2.onrender.com/lookup ---
     primary = fetch_profile_from_lookup_api(account_id, zone_id)
     if primary.get("success"):
         return primary
 
-    logger.info(f"Primary lookup failed: {primary.get('error')} — trying fallbacks")
-
-    # --- 2) CN31 profile endpoints ---
     if token:
         s = _cn31_session(token)
         for url in [
@@ -777,14 +713,12 @@ def fetch_account_info(account_id: int, zone_id: int, token: Optional[str]) -> D
                 r = s.get(url, timeout=8)
                 if r.status_code != 200:
                     continue
-                data = r.json()
-                p = _extract_player(data)
+                p = _extract_player(r.json())
                 if p:
                     return {"success": True, "data": p, "source": "cn31"}
             except Exception:
                 continue
 
-    # --- 3) Other public lookup APIs ---
     for api, key in FALLBACK_LOOKUPS:
         try:
             r = requests.post(
@@ -918,6 +852,18 @@ def _pick(d: Dict, *keys, default="N/A"):
     return default
 
 
+def _pick_int(d: Dict, *keys, default=0) -> int:
+    for k in keys:
+        v = d.get(k)
+        if v is None:
+            continue
+        try:
+            return int(float(v))
+        except (ValueError, TypeError):
+            continue
+    return default
+
+
 def render_single(result: Dict) -> str:
     if not result.get("success"):
         return (
@@ -969,7 +915,7 @@ def render_single(result: Dict) -> str:
 
 
 # ============================================================
-# TELEGRAM KEYBOARD
+# KEYBOARD
 # ============================================================
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -1017,13 +963,13 @@ async def cb_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_lookup":
         txt = ("🔍 *Full Lookup*\n\n"
                "Logs in the device ID via the real MLBB TCP server, then fetches\n"
-               "profile data from the lookup API and checks ban status.\n\n"
+               "profile data and checks ban status.\n\n"
                "Send:\n`/lookup <device_id>`\n\n"
                "Free.")
     elif data == "menu_bulk":
         txt = ("📦 *Bulk Check (admin only)*\n\n"
-               "Send a `.txt` file with one device ID per line with caption `/bulk`,\n"
-               "or reply to a document with `/bulk`.")
+               "Send `/bulk` first, then upload your `.txt` file\n"
+               "with one device ID per line.")
     elif data == "menu_balance":
         u = await get_user(q.from_user.id)
         txt = (f"💰 Balance: `{u['balance']}` PHP\n"
@@ -1117,11 +1063,7 @@ async def cmd_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Usage: `/lookup <device_id>`", parse_mode="Markdown")
         return
     device_id = ctx.args[0].strip()
-    msg = await update.message.reply_text(
-        "⏳ Logging in device…\n"
-        "_(first lookup may take up to 60s while the profile API cold-starts)_",
-        parse_mode="Markdown",
-    )
+    msg = await update.message.reply_text("⏳ Logging in & fetching account info…")
     result = await asyncio.to_thread(full_check, device_id)
     try:
         await msg.edit_text(render_single(result), parse_mode="Markdown")
@@ -1129,23 +1071,7 @@ async def cmd_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(render_single(result))
 
 
-async def cmd_wake(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Admin: warm up the lookup API so the next /lookup is fast."""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Admin only.")
-        return
-    msg = await update.message.reply_text("⏳ Waking lookup API…")
-    def _run():
-        global _lookup_awake_until
-        _lookup_awake_until = 0  # force
-        _wake_lookup_service()
-        return True
-    await asyncio.to_thread(_run)
-    await msg.edit_text("✅ Lookup API pinged. Next /lookup should be fast.")
-
-
 async def cmd_diag(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Admin: dump raw TCP login + token + lookup API state."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Admin only.")
         return
@@ -1153,7 +1079,7 @@ async def cmd_diag(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Usage: `/diag <device_id>`", parse_mode="Markdown")
         return
     device_id = ctx.args[0].strip()
-    msg = await update.message.reply_text("⏳ Running raw TCP login + token + lookup probe…")
+    msg = await update.message.reply_text("⏳ Running diagnostics…")
 
     def _run():
         g = GameLogin(device_id)
@@ -1192,25 +1118,38 @@ async def cmd_diag(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(chunk)
 
 
-async def cmd_bulk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Admin only.")
-        return
+# ============================================================
+# BULK CHECK — live stats
+# ============================================================
+def render_bulk_live(stats: Dict) -> str:
+    done = stats["done"]
+    total = stats["total"]
+    bar_len = 12
+    filled = int(bar_len * done / total) if total else 0
+    bar = "█" * filled + "░" * (bar_len - filled)
 
-    doc = None
-    if update.message.reply_to_message and update.message.reply_to_message.document:
-        doc = update.message.reply_to_message.document
-    elif update.message.document:
-        doc = update.message.document
+    def _short(dev):
+        if not dev:
+            return ""
+        return f" `{dev[:14]}…`" if len(dev) > 14 else f" `{dev}`"
 
-    if not doc:
-        await update.message.reply_text(
-            "❌ Send a `.txt` file (one device ID per line) with caption `/bulk`, "
-            "or reply to a document with `/bulk`.",
-            parse_mode="Markdown",
-        )
-        return
+    lines = [
+        f"📦 *Bulk Check — Live*",
+        f"`[{bar}]` {done}/{total}",
+        "",
+        f"✅ Valid   : `{stats['valid']}`",
+        f"❌ Invalid : `{stats['invalid']}`",
+        f"🚫 Banned  : `{stats['banned']}`",
+        "",
+        f"🏆 *Highest Level* : `{stats['highest_level']}`{_short(stats['highest_level_dev'])}",
+        f"🎨 *Highest Skins* : `{stats['highest_skin']}`{_short(stats['highest_skin_dev'])}",
+        "",
+        f"⏱ Elapsed: `{int(time.time() - stats['started'])}s`",
+    ]
+    return "\n".join(lines)
 
+
+async def run_bulk(update: Update, ctx: ContextTypes.DEFAULT_TYPE, doc):
     f = await doc.get_file()
     buf = io.BytesIO()
     await f.download_to_memory(buf)
@@ -1233,12 +1172,27 @@ async def cmd_bulk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No device IDs found in file.")
         return
 
+    stats = {
+        "total": len(unique),
+        "done": 0,
+        "valid": 0,
+        "invalid": 0,
+        "banned": 0,
+        "highest_level": 0,
+        "highest_level_dev": None,
+        "highest_skin": 0,
+        "highest_skin_dev": None,
+        "started": time.time(),
+    }
+
     status = await update.message.reply_text(
-        f"📦 Bulk check started: {len(unique)} device IDs.\nThis may take a while…"
+        render_bulk_live(stats), parse_mode="Markdown"
     )
 
     results: List[Dict] = []
     sem = asyncio.Semaphore(3)
+    last_edit = {"t": 0.0}
+    EDIT_INTERVAL = 1.5  # seconds between Telegram edits
 
     async def worker(dev: str):
         async with sem:
@@ -1247,18 +1201,43 @@ async def cmd_bulk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 return {"success": False, "stage": "worker", "error": str(e), "device_id": dev}
 
+    async def update_status(force: bool = False):
+        now = time.time()
+        if not force and now - last_edit["t"] < EDIT_INTERVAL:
+            return
+        last_edit["t"] = now
+        try:
+            await status.edit_text(render_bulk_live(stats), parse_mode="Markdown")
+        except Exception:
+            pass
+
     tasks = [worker(d) for d in unique]
-    completed = 0
     for coro in asyncio.as_completed(tasks):
         res = await coro
         results.append(res)
-        completed += 1
-        if completed % 5 == 0 or completed == len(unique):
-            try:
-                await status.edit_text(f"📦 Bulk check progress: {completed}/{len(unique)}…")
-            except Exception:
-                pass
+        stats["done"] += 1
 
+        if res.get("success"):
+            stats["valid"] += 1
+            if res.get("banned"):
+                stats["banned"] += 1
+            p = res.get("profile") or {}
+            lvl = _pick_int(p, "level", "account_level", "lvl")
+            sk = _pick_int(p, "skin_count", "skins", "total_skins")
+            if lvl > stats["highest_level"]:
+                stats["highest_level"] = lvl
+                stats["highest_level_dev"] = res.get("device_id")
+            if sk > stats["highest_skin"]:
+                stats["highest_skin"] = sk
+                stats["highest_skin_dev"] = res.get("device_id")
+        else:
+            stats["invalid"] += 1
+
+        await update_status()
+
+    await update_status(force=True)
+
+    # Final summary
     banned = [r for r in results if r.get("success") and r.get("banned")]
     clean = [r for r in results if r.get("success") and not r.get("banned")]
     failed = [r for r in results if not r.get("success")]
@@ -1269,6 +1248,10 @@ async def cmd_bulk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "clean": len(clean),
         "banned": len(banned),
         "failed": len(failed),
+        "highest_level": stats["highest_level"],
+        "highest_level_device": stats["highest_level_dev"],
+        "highest_skin": stats["highest_skin"],
+        "highest_skin_device": stats["highest_skin_dev"],
         "results": results,
     }
     report_path = REPORTS_DIR / f"bulk_report_{int(time.time())}.json"
@@ -1283,12 +1266,17 @@ async def cmd_bulk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     summary = (
         f"📦 *Bulk Check Complete*\n\n"
         f"Total   : `{len(results)}`\n"
-        f"✅ Clean : `{len(clean)}`\n"
+        f"✅ Valid : `{len(clean)}`\n"
         f"🚫 Banned: `{len(banned)}`\n"
-        f"❌ Failed: `{len(failed)}`\n"
+        f"❌ Invalid: `{len(failed)}`\n\n"
+        f"🏆 *Highest Level* : `{stats['highest_level']}`"
+        + (f" — `{stats['highest_level_dev']}`" if stats["highest_level_dev"] else "")
+        + "\n"
+        f"🎨 *Highest Skins* : `{stats['highest_skin']}`"
+        + (f" — `{stats['highest_skin_dev']}`" if stats["highest_skin_dev"] else "")
     )
     if banned:
-        summary += "\n*Banned device IDs:*\n"
+        summary += "\n\n*Banned device IDs:*\n"
         for r in banned[:20]:
             summary += f"• `{r['device_id']}` — {r.get('ban_reason', 'N/A')}\n"
         if len(banned) > 20:
@@ -1297,10 +1285,57 @@ async def cmd_bulk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         await status.edit_text(summary, parse_mode="Markdown")
     except Exception:
-        await update.message.reply_text(summary)
+        await update.message.reply_text(summary, parse_mode="Markdown")
     await update.message.reply_document(document=out, filename=out.name)
 
 
+async def cmd_bulk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    # Case A: a document is already attached / replied to
+    doc = None
+    if update.message.reply_to_message and update.message.reply_to_message.document:
+        doc = update.message.reply_to_message.document
+    elif update.message.document:
+        doc = update.message.document
+
+    if doc:
+        await run_bulk(update, ctx, doc)
+        return
+
+    # Case B: enter "waiting for file" state
+    uid = update.effective_user.id
+    BULK_WAITING.add(uid)
+    _bulk_wait_ts[uid] = time.time()
+    await update.message.reply_text(
+        "📦 *Bulk Check ready.*\n\n"
+        "Now send your `.txt` file — one device ID per line.\n"
+        "_You have 5 minutes._",
+        parse_mode="Markdown",
+    )
+
+
+async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Catches the .txt file sent after /bulk."""
+    uid = update.effective_user.id
+    if uid != ADMIN_ID:
+        return
+    if uid not in BULK_WAITING:
+        return
+    # Expire stale wait
+    if time.time() - _bulk_wait_ts.get(uid, 0) > BULK_WAIT_TIMEOUT_SEC:
+        BULK_WAITING.discard(uid)
+        return
+    BULK_WAITING.discard(uid)
+    _bulk_wait_ts.pop(uid, None)
+    await run_bulk(update, ctx, update.message.document)
+
+
+# ============================================================
+# OTHER HANDLERS
+# ============================================================
 async def cmd_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     await reset_daily_if_needed(uid)
@@ -1365,15 +1400,6 @@ async def post_init(application: Application) -> None:
     print(f"🗄  DB: {DB_PATH}")
     print(f"🔍 Lookup API: {LOOKUP_API}")
 
-    # Warm up the lookup API in the background so the first user gets a fast reply
-    def _warm():
-        try:
-            _wake_lookup_service()
-            logger.info("Lookup API warmed up.")
-        except Exception as e:
-            logger.warning(f"Lookup warm-up failed: {e}")
-    threading.Thread(target=_warm, daemon=True).start()
-
 
 def main():
     if not BOT_TOKEN:
@@ -1396,11 +1422,14 @@ def main():
     app.add_handler(CommandHandler("check_ban", cmd_check_ban))
     app.add_handler(CommandHandler("lookup", cmd_lookup))
     app.add_handler(CommandHandler("diag", cmd_diag))
-    app.add_handler(CommandHandler("wake", cmd_wake))
     app.add_handler(CommandHandler("balance", cmd_balance))
     app.add_handler(CommandHandler("redeem", cmd_redeem))
     app.add_handler(CommandHandler("gencode", cmd_gencode))
     app.add_handler(CommandHandler("bulk", cmd_bulk))
+
+    # Document handler — picks up the .txt file after /bulk
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+
     app.add_handler(CallbackQueryHandler(cb_menu))
     app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))
     app.add_error_handler(on_error)
