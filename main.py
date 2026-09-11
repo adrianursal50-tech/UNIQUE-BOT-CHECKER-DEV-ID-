@@ -4,9 +4,9 @@ MLBB Telegram Bot — production build for Railway.
 Real TCP login validation, account lookup, ban check, single + bulk check.
 
 Env vars (set in Railway → Variables):
-  BOT_TOKEN            (required)  Telegram bot token
-  ADMIN_ID             (required)  numeric Telegram user ID of admin
-  DATA_DIR             (default /data)  persistent volume mount
+  BOT_TOKEN            (required)
+  ADMIN_ID             (required)
+  DATA_DIR             (default /data)
   PRICE_CREATION       (default 10)
   PRICE_BAN            (default 10)
   FREE_DAILY_CREATION  (default 2)
@@ -29,7 +29,7 @@ import struct
 import asyncio
 import logging
 import threading
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from urllib.parse import urlparse
@@ -50,7 +50,7 @@ from telegram.ext import (
 )
 
 # ============================================================
-# LOGGING (quiet httpx/telegram before anything else)
+# LOGGING
 # ============================================================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -66,8 +66,8 @@ logger.setLevel(logging.INFO)
 # ============================================================
 # CONFIG
 # ============================================================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8728762913:AAGjtUiPLsUrN1KXjWS7rEAi1wwZefk9rFA").strip()
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "8621676055") or 0)
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
 
 PRICE_CREATION = int(os.environ.get("PRICE_CREATION", "10"))
 PRICE_BAN = int(os.environ.get("PRICE_BAN", "10"))
@@ -547,7 +547,8 @@ class GameLogin:
                 "zone_id": zone_id,
                 "ban_flag": res.get(3) or res.get(10) or res.get(20),
                 "creation_ts": res.get(19, 0),
-                "raw": dict(res),
+                "raw": {str(k): (v if isinstance(v, (int, float, str, bool, type(None))) else repr(v))
+                        for k, v in dict(res).items()},
             }
         except socket.timeout:
             return {"success": False, "error": "TCP timeout"}
@@ -583,17 +584,27 @@ def fetch_cn31_token() -> Optional[str]:
     return None
 
 
-def check_ban_real(account_id: int, zone_id: int, token: str) -> Dict:
-    proxies = get_proxy()
+def _cn31_session(token: str) -> requests.Session:
+    """Build a session with BOTH Authorization: Bearer and Cookie headers (Fix C1)."""
     s = requests.Session()
-    if proxies:
-        s.proxies.update(proxies)
+    px = get_proxy()
+    if px:
+        s.proxies.update(px)
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36",
         "Accept": "application/json",
         "Authorization": f"Bearer {token}",
+        "Cookie": f"session_key={token}; token={token}",
         "Referer": "https://account.cn31.mobilelegends.com/",
+        "Origin": "https://account.cn31.mobilelegends.com",
     })
+    return s
+
+
+def check_ban_real(account_id: int, zone_id: int, token: Optional[str]) -> Dict:
+    if not token:
+        return {"banned": False, "reason": "No CN31 token — TCP flag will be used", "source": "tcp-pending"}
+    s = _cn31_session(token)
     endpoints = [
         f"https://account.cn31.mobilelegends.com/v1/ban/info?uid={account_id}&zone={zone_id}",
         f"https://account.cn31.mlbb.com/v1/status?uid={account_id}&zone={zone_id}",
@@ -623,17 +634,9 @@ def check_ban_real(account_id: int, zone_id: int, token: str) -> Dict:
 
 
 def fetch_account_info(account_id: int, zone_id: int, token: Optional[str]) -> Dict:
+    # 1) CN31 with both auth header formats
     if token:
-        proxies = get_proxy()
-        s = requests.Session()
-        if proxies:
-            s.proxies.update(proxies)
-        s.headers.update({
-            "User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}",
-            "Referer": "https://account.cn31.mobilelegends.com/",
-        })
+        s = _cn31_session(token)
         for url in [
             f"https://account.cn31.mobilelegends.com/v1/profile?uid={account_id}&zone={zone_id}",
             f"https://account.cn31.mobilelegends.com/v1/player/info?uid={account_id}&zone={zone_id}",
@@ -650,6 +653,7 @@ def fetch_account_info(account_id: int, zone_id: int, token: Optional[str]) -> D
             except Exception:
                 continue
 
+    # 2) Public lookup fallbacks
     for api in [
         "https://mlbbbbv2.onrender.com/lookup",
         "https://mlbbapi.onrender.com/lookup",
@@ -671,7 +675,7 @@ def fetch_account_info(account_id: int, zone_id: int, token: Optional[str]) -> D
                     return {"success": True, "data": p, "source": api}
             except Exception:
                 continue
-    return {"success": False, "error": "No profile source returned data"}
+    return {"success": False, "error": "no profile API reachable"}
 
 
 # ============================================================
@@ -703,7 +707,7 @@ def _cache_put(device_id: str, val: Dict):
 
 
 # ============================================================
-# FULL CHECK PIPELINE
+# FULL CHECK PIPELINE (Fix E: never fails on profile enrichment)
 # ============================================================
 def full_check(device_id: str) -> Dict:
     cached = _cache_get(device_id)
@@ -722,14 +726,29 @@ def full_check(device_id: str) -> Dict:
 
     account_id = login["account_id"]
     zone_id = login["zone_id"]
-    token = fetch_cn31_token()
 
-    profile = fetch_account_info(account_id, zone_id, token)
-    ban = check_ban_real(account_id, zone_id, token) if token else {
-        "banned": False, "reason": "No CN31 token", "source": "none"
-    }
-    if not ban["banned"] and login.get("ban_flag"):
-        ban = {"banned": True, "reason": f"TCP flag {login['ban_flag']}", "source": "tcp"}
+    token: Optional[str] = None
+    profile: Dict = {"success": False, "error": "skipped"}
+    ban: Dict = {"banned": False, "reason": "not checked", "source": "none"}
+
+    try:
+        token = fetch_cn31_token()
+    except Exception as e:
+        logger.warning(f"token fetch raised: {e}")
+
+    try:
+        profile = fetch_account_info(account_id, zone_id, token)
+    except Exception as e:
+        profile = {"success": False, "error": f"profile exception: {e}"}
+
+    try:
+        ban = check_ban_real(account_id, zone_id, token)
+    except Exception as e:
+        ban = {"banned": False, "reason": f"ban exception: {e}", "source": "none"}
+
+    # TCP ban_flag is authoritative if it says banned
+    if login.get("ban_flag") and not ban["banned"]:
+        ban = {"banned": True, "reason": f"TCP ban_flag={login['ban_flag']}", "source": "tcp"}
 
     result = {
         "success": True,
@@ -761,7 +780,7 @@ def fmt_creation(ts) -> str:
         return "N/A"
     try:
         sec = ts / 1000 if ts > 1e10 else ts
-        return datetime.fromtimestamp(sec).strftime("%Y-%m-%d %H:%M UTC")
+        return datetime.fromtimestamp(sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
         return "N/A"
 
@@ -773,11 +792,14 @@ def render_single(result: Dict) -> str:
             f"Stage: `{result.get('stage', '?')}`\n"
             f"Reason: `{result.get('error', 'Unknown')}`"
         )
+
     p = result.get("profile") or {}
     tag = " _(cached)_" if result.get("cached") else ""
+
     lines = [
         f"📱 *Device Check Result*{tag}",
         "",
+        "🟢 *Login*: success",
         f"🆔 Device ID : `{result['device_id']}`",
         f"👤 Account ID: `{result['account_id']}`",
         f"🗺 Zone ID   : `{result['zone_id']}`",
@@ -786,23 +808,28 @@ def render_single(result: Dict) -> str:
         f"🚫 *Banned*  : {fmt_bool(result['banned'])}",
         f"   Reason    : `{result.get('ban_reason', 'N/A')}`",
         f"   Source    : `{result.get('ban_source', 'N/A')}`",
-        "",
     ]
-    if p:
+
+    if p and (p.get("nickname") or p.get("name")):
         lines += [
+            "",
             "📊 *Account Info*",
-            f"• Nickname : `{p.get('nickname') or p.get('name') or 'N/A'}`",
+            f"• Nickname : `{p.get('nickname') or p.get('name')}`",
             f"• Level    : `{p.get('level', 'N/A')}`",
             f"• Rank     : `{p.get('current_rank') or p.get('rank') or 'N/A'}`",
             f"• Heroes   : `{p.get('hero_count') or p.get('heroes') or 'N/A'}`",
             f"• Skins    : `{p.get('skin_count') or p.get('skins') or 'N/A'}`",
             f"• Winrate  : `{p.get('win_rate') or p.get('winrate') or 'N/A'}`",
-            f"• Matches  : `{p.get('matches') or 'N/A'}`",
-            f"• MVP      : `{p.get('mvp') or 'N/A'}`",
             f"• Source   : `{result.get('profile_source', 'N/A')}`",
         ]
     else:
-        lines.append(f"📊 Account info unavailable: `{result.get('profile_error', 'unknown')}`")
+        lines += [
+            "",
+            "📊 *Account Info*: _unavailable_",
+            f"   Reason: `{result.get('profile_error') or 'no profile API reachable'}`",
+            "",
+            "_Identity and ban status above are from the real MLBB login server._",
+        ]
     return "\n".join(lines)
 
 
@@ -960,6 +987,42 @@ async def cmd_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(render_single(result), parse_mode="Markdown")
 
 
+async def cmd_diag(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin: dump raw TCP login + token fetch diagnostics."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Admin only.")
+        return
+    if not ctx.args:
+        await update.message.reply_text("❌ Usage: `/diag <device_id>`", parse_mode="Markdown")
+        return
+    device_id = ctx.args[0].strip()
+    msg = await update.message.reply_text("⏳ Running raw TCP login + token probe…")
+
+    def _run():
+        g = GameLogin(device_id)
+        login_res = g.resolve()
+        token = fetch_cn31_token()
+        return {
+            "device_id": device_id,
+            "login": login_res,
+            "token_ok": bool(token),
+            "token_preview": (token[:24] + "…") if token else None,
+        }
+
+    raw = await asyncio.to_thread(_run)
+    try:
+        pretty = json.dumps(raw, indent=2, default=str)
+    except Exception as e:
+        pretty = f"<json error: {e}>"
+
+    for i in range(0, len(pretty), 3500):
+        chunk = pretty[i:i + 3500]
+        try:
+            await update.message.reply_text(f"```json\n{chunk}\n```", parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text(chunk)
+
+
 async def cmd_bulk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Admin only.")
@@ -1010,7 +1073,10 @@ async def cmd_bulk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     async def worker(dev: str):
         async with sem:
-            return await asyncio.to_thread(full_check, dev)
+            try:
+                return await asyncio.to_thread(full_check, dev)
+            except Exception as e:
+                return {"success": False, "stage": "worker", "error": str(e), "device_id": dev}
 
     tasks = [worker(d) for d in unique]
     completed = 0
@@ -1029,7 +1095,7 @@ async def cmd_bulk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     failed = [r for r in results if not r.get("success")]
 
     report = {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "total": len(results),
         "clean": len(clean),
         "banned": len(banned),
@@ -1059,7 +1125,10 @@ async def cmd_bulk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if len(banned) > 20:
             summary += f"…and {len(banned) - 20} more (see report)\n"
 
-    await status.edit_text(summary, parse_mode="Markdown")
+    try:
+        await status.edit_text(summary, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text(summary)
     await update.message.reply_document(document=out, filename=out.name)
 
 
@@ -1115,13 +1184,10 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# STARTUP / MAIN (the fix)
+# STARTUP / MAIN
 # ============================================================
 async def post_init(application: Application) -> None:
-    """
-    Runs inside PTB's event loop AFTER startup.
-    Do NOT call asyncio.run() before run_polling() — that closes the loop.
-    """
+    """Runs inside PTB's event loop AFTER startup. No asyncio.run() before run_polling()."""
     await init_db()
     logger.info("Bot initialized — DB ready.")
     print("🤖 Bot running. Ctrl+C to stop.")
@@ -1151,6 +1217,7 @@ def main():
     app.add_handler(CommandHandler("check_creation", cmd_check_creation))
     app.add_handler(CommandHandler("check_ban", cmd_check_ban))
     app.add_handler(CommandHandler("lookup", cmd_lookup))
+    app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("balance", cmd_balance))
     app.add_handler(CommandHandler("redeem", cmd_redeem))
     app.add_handler(CommandHandler("gencode", cmd_gencode))
@@ -1159,7 +1226,6 @@ def main():
     app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))
     app.add_error_handler(on_error)
 
-    # 30s long-poll read timeout cuts getUpdates log spam by 3×
     app.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=False,
@@ -1170,3 +1236,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
