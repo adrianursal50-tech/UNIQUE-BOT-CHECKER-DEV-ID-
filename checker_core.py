@@ -430,7 +430,7 @@ class GameConnection(BaseConnection):
                 m = b.get("endtime_min","0"); s = b.get("endtime_sec","0")
                 try: total = int(d)*86400 + int(h)*3600 + int(m)*60 + int(s)
                 except Exception: total = 0
-              if reason and str(reason).strip() and total > 0:
+                if reason and str(reason).strip() and total > 0:
                     label = f"Banned (Reason: {reason} | {d}d {h}h {m}m {s}s)"
                     return {"banned": True, "reason": str(reason),
                             "remaining": f"{d}d {h}h {m}m {s}s", "label": label}
