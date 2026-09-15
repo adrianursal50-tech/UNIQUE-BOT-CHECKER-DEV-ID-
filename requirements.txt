@@ -1,3 +1,16 @@
-aiogram>=3.15
-pycryptodome>=3.20
-zstandard>=0.22
+# ────────────────────────────────────────────────────────────────
+# Premium DevID Seker — Telegram Bot
+# Python 3.9+ required
+# ────────────────────────────────────────────────────────────────
+
+# Telegram bot framework
+python-telegram-bot>=21.0,<22.0
+
+# HTTP client (required by python-telegram-bot for custom timeouts)
+httpx>=0.27.0
+
+# Zstandard compression (MLBB protocol frames)
+zstandard>=0.22.0
+
+# AES encryption (MLBB protocol encryption)
+pycryptodome>=3.20.0
