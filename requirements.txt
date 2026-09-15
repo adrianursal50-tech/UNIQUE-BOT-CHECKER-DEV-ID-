@@ -14,3 +14,4 @@ zstandard>=0.22.0
 
 # AES encryption (MLBB protocol encryption)
 pycryptodome>=3.20.0
+requests
