@@ -9,8 +9,8 @@ from functools import wraps
 from io import BytesIO
 from typing import Any, Dict, List, Optional
 
-import psycopg2
-import psycopg2.extras
+import psycopg
+from psycopg.rows import dict_row
 
 from flask import (Flask, render_template, request, jsonify, send_file, session)
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -65,9 +65,7 @@ KICK_CREDIT_COST = 5
 def get_db():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not set")
-    conn = psycopg2.connect(DATABASE_URL,
-                            cursor_factory=psycopg2.extras.RealDictCursor,
-                            connect_timeout=10)
+    conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
     return conn
 
 def init_db():
@@ -509,7 +507,7 @@ def api_signup():
                        VALUES (%s,%s,%s,%s)""",
                     (uid, FREE_CREDITS, "welcome_bonus", int(time.time())))
         conn.commit()
-    except psycopg2.IntegrityError:
+      except psycopg.IntegrityError:
         conn.rollback()
         cur.close(); conn.close()
         return jsonify({"ok": False, "error": "Username already taken"}), 400
