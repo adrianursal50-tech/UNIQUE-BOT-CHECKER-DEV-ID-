@@ -1,13 +1,13 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
-    "builder": "DOCKERFILE",
-    "dockerfilePath": "Dockerfile"
+    "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python -u main.py",
+    "startCommand": "gunicorn web_app:app --bind 0.0.0.0:$PORT --workers 2 --threads 8 --timeout 120",
+    "healthcheckPath": "/api/health",
+    "healthcheckTimeout": 100,
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10,
-    "numReplicas": 1
+    "restartPolicyMaxRetries": 5
   }
 }
