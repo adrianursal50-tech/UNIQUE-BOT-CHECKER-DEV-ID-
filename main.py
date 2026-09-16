@@ -23,8 +23,8 @@ from checker_core import (
     generate_device_ids, read_ids_from_text, save_line, save_ban_line,
 )
 
-BOT_TOKEN      = os.environ.get("BOT_TOKEN", "").strip()
-ADMIN_IDS      = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
+BOT_TOKEN      = os.environ.get("BOT_TOKEN", "8702549007:AAHe3d-RSBaYs4wX4D4x4rkLpevipByEPqs").strip()
+ADMIN_IDS      = [int(x) for x in os.environ.get("ADMIN_IDS", "8621676055").split(",") if x.strip().isdigit()]
 DB_PATH        = os.environ.get("DB_PATH", "bot.db")
 BULK_THREADS   = int(os.environ.get("BULK_THREADS", "30"))
 KICK_DELAY     = float(os.environ.get("KICK_DELAY", "3.0"))
