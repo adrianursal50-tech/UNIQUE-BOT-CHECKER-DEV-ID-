@@ -507,7 +507,7 @@ def api_signup():
                        VALUES (%s,%s,%s,%s)""",
                     (uid, FREE_CREDITS, "welcome_bonus", int(time.time())))
         conn.commit()
-      except psycopg.IntegrityError:
+        except psycopg.IntegrityError:
         conn.rollback()
         cur.close(); conn.close()
         return jsonify({"ok": False, "error": "Username already taken"}), 400
