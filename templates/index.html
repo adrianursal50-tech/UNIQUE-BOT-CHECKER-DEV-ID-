@@ -1,156 +1,218 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
+<meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>MLBB Checker — Web</title>
-<link rel="stylesheet" href="/static/style.css" />
+<title>MLBB Checker</title>
+<link rel="stylesheet" href="/static/style.css"/>
 </head>
 <body>
-<header class="topbar">
-  <div class="brand">⚡ <b>MLBB CHECKER</b> <span class="brand-sub">/ web edition</span></div>
-  <div class="brand-info">
-    <span id="health-dot" class="dot"></span>
-    <span id="health-text">connected</span>
+
+<!-- ══════════════ AUTH VIEW ══════════════ -->
+<div id="view-auth" class="view">
+  <div class="auth-card">
+    <div class="brand-line">⚡ <b>MLBB CHECKER</b></div>
+    <div class="auth-tabs">
+      <button class="auth-tab active" data-auth="login">Sign In</button>
+      <button class="auth-tab" data-auth="signup">Sign Up</button>
+    </div>
+
+    <!-- login -->
+    <form id="form-login" class="auth-form active">
+      <input class="input" name="username" placeholder="Username" autocomplete="username" required/>
+      <input class="input" name="password" type="password" placeholder="Password" autocomplete="current-password" required/>
+      <button class="btn primary" type="submit">Sign In</button>
+      <div class="auth-err" data-err></div>
+    </form>
+
+    <!-- signup -->
+    <form id="form-signup" class="auth-form">
+      <input class="input" name="username" placeholder="Username (3–20 alnum)" required/>
+      <input class="input" name="password" type="password" placeholder="Password (min 6)" required/>
+      <div class="captcha-row">
+        <span class="captcha-q" id="captcha-q">loading…</span>
+        <input class="input small" name="captcha" placeholder="answer" required/>
+        <button class="btn ghost small" type="button" id="captcha-reload">↻</button>
+      </div>
+      <button class="btn primary" type="submit">Create Account (50 free credits)</button>
+      <div class="auth-err" data-err></div>
+    </form>
   </div>
-</header>
+</div>
 
-<nav class="tabs">
-  <button class="tab active" data-tab="single">🔍 Single Check</button>
-  <button class="tab" data-tab="bulk">📦 Bulk Check</button>
-  <button class="tab" data-tab="ban">🚫 Ban Check</button>
-  <button class="tab" data-tab="banbulk">📦 Ban Bulk</button>
-  <button class="tab" data-tab="generate">🎲 Generate</button>
-  <button class="tab" data-tab="kick">⚡ Kick</button>
-</nav>
-
-<main>
-
-  <!-- ═════════════════ SINGLE ═════════════════ -->
-  <section class="panel active" id="panel-single">
-    <h2>🔍 Single Device Check</h2>
-    <p class="muted">Fetch full player info for one device ID.</p>
-
-    <div class="row">
-      <input id="single-input" class="input" placeholder="and_xxxxxxxx…" />
-      <button id="single-btn" class="btn primary">Check</button>
+<!-- ══════════════ MAIN APP ══════════════ -->
+<div id="view-app" class="view hidden">
+  <header class="topbar">
+    <div class="brand">⚡ <b>MLBB CHECKER</b></div>
+    <div class="userbar">
+      <span class="credits">💳 <b id="my-credits">0</b> credits</span>
+      <span class="uname">👤 <b id="my-name">—</b></span>
+      <button class="btn small ghost hidden" id="admin-btn">🛠 Admin</button>
+      <button class="btn small ghost" id="logout-btn">Logout</button>
     </div>
+  </header>
 
-    <div id="single-output" class="result"></div>
-  </section>
+  <nav class="tabs">
+    <button class="tab active" data-tab="single">🔍 Single</button>
+    <button class="tab" data-tab="bulk">📦 Bulk</button>
+    <button class="tab" data-tab="ban">🚫 Ban</button>
+    <button class="tab" data-tab="banbulk">📦 Ban Bulk</button>
+    <button class="tab" data-tab="generate">🎲 Generate</button>
+    <button class="tab" data-tab="kick">⚡ Kick</button>
+    <button class="tab" data-tab="jobs">📋 My Jobs</button>
+  </nav>
 
-  <!-- ═════════════════ BULK ═════════════════ -->
-  <section class="panel" id="panel-bulk">
-    <h2>📦 Bulk Device Check</h2>
-    <p class="muted">Paste one device ID per line. 30 threads by default.</p>
-
-    <div class="row">
-      <label class="lbl">Threads</label>
-      <input id="bulk-threads" class="input small" type="number" value="30" min="1" max="60"/>
-    </div>
-
-    <textarea id="bulk-input" class="textarea" placeholder="and_xxx&#10;and_yyy&#10;..."></textarea>
-
-    <div class="row">
-      <button id="bulk-start" class="btn primary">Start Bulk</button>
-      <button id="bulk-stop" class="btn danger" disabled>Stop</button>
-      <button id="bulk-dl" class="btn ghost" disabled>Download Results</button>
-    </div>
-
-    <div id="bulk-progress" class="progress-wrap hidden">
-      <div class="progress-bar"><div id="bulk-bar" class="progress-fill"></div></div>
-      <div class="stats-grid">
-        <div class="stat"><span class="k">Total</span><span id="st-total" class="v">0</span></div>
-        <div class="stat"><span class="k">Checked</span><span id="st-checked" class="v">0</span></div>
-        <div class="stat ok"><span class="k">✅ Registered</span><span id="st-reg" class="v">0</span></div>
-        <div class="stat warn"><span class="k">⚠️ Unregistered</span><span id="st-unreg" class="v">0</span></div>
-        <div class="stat err"><span class="k">❌ Invalid</span><span id="st-inv" class="v">0</span></div>
-        <div class="stat"><span class="k">📦 Valid</span><span id="st-valid" class="v">0</span></div>
+  <main>
+    <!-- SINGLE -->
+    <section class="panel active" id="panel-single">
+      <h2>🔍 Single Check</h2>
+      <p class="muted">Full player info for one device ID (1 credit).</p>
+      <div class="row">
+        <input id="single-input" class="input" placeholder="and_xxxxxxxx…"/>
+        <button id="single-btn" class="btn primary">Check</button>
       </div>
-      <div id="bulk-latest" class="latest"></div>
-    </div>
-  </section>
+      <div id="single-output" class="result"></div>
+    </section>
 
-  <!-- ═════════════════ BAN SINGLE ═════════════════ -->
-  <section class="panel" id="panel-ban">
-    <h2>🚫 Ban Check (single)</h2>
-    <p class="muted">Uses accurate PID 20001 method. Can take 20–25 s.</p>
-
-    <div class="row">
-      <input id="ban-input" class="input" placeholder="and_xxxxxxxx…" />
-      <button id="ban-btn" class="btn primary">Check Ban</button>
-    </div>
-
-    <div id="ban-output" class="result"></div>
-  </section>
-
-  <!-- ═════════════════ BAN BULK ═════════════════ -->
-  <section class="panel" id="panel-banbulk">
-    <h2>📦 Ban Bulk</h2>
-    <p class="muted">Scan many device IDs for ban status.</p>
-
-    <div class="row">
-      <label class="lbl">Threads</label>
-      <input id="banbulk-threads" class="input small" type="number" value="20" min="1" max="60"/>
-    </div>
-
-    <textarea id="banbulk-input" class="textarea" placeholder="and_xxx&#10;and_yyy&#10;..."></textarea>
-
-    <div class="row">
-      <button id="banbulk-start" class="btn primary">Start Ban Scan</button>
-      <button id="banbulk-stop" class="btn danger" disabled>Stop</button>
-      <button id="banbulk-dl" class="btn ghost" disabled>Download Results</button>
-    </div>
-
-    <div id="banbulk-progress" class="progress-wrap hidden">
-      <div class="progress-bar"><div id="banbulk-bar" class="progress-fill"></div></div>
-      <div class="stats-grid">
-        <div class="stat"><span class="k">Total</span><span id="bst-total" class="v">0</span></div>
-        <div class="stat"><span class="k">Checked</span><span id="bst-checked" class="v">0</span></div>
-        <div class="stat err"><span class="k">🚫 Banned</span><span id="bst-banned" class="v">0</span></div>
-        <div class="stat ok"><span class="k">✅ Clean</span><span id="bst-clean" class="v">0</span></div>
-        <div class="stat warn"><span class="k">⚠️ Unknown/Unreg</span><span id="bst-unreg" class="v">0</span></div>
-        <div class="stat err"><span class="k">❌ Invalid</span><span id="bst-inv" class="v">0</span></div>
+    <!-- BULK -->
+    <section class="panel" id="panel-bulk">
+      <h2>📦 Bulk Check</h2>
+      <p class="muted">One device ID per line. 1 credit per ID.</p>
+      <div class="row">
+        <label class="lbl">Threads</label>
+        <input id="bulk-threads" class="input small" type="number" value="40" min="1" max="60"/>
+        <span class="muted" id="bulk-cost-hint"></span>
       </div>
-      <div id="banbulk-latest" class="latest"></div>
-    </div>
-  </section>
+      <textarea id="bulk-input" class="textarea" placeholder="and_xxx&#10;and_yyy&#10;..."></textarea>
+      <div class="row">
+        <button id="bulk-start" class="btn primary">Start Bulk</button>
+        <button id="bulk-stop" class="btn danger" disabled>Stop</button>
+        <button id="bulk-dl" class="btn ghost" disabled>Download</button>
+      </div>
+      <div id="bulk-progress" class="progress-wrap hidden">
+        <div class="progress-bar"><div id="bulk-bar" class="progress-fill"></div></div>
+        <div class="stats-grid">
+          <div class="stat"><span class="k">Total</span><span id="st-total" class="v">0</span></div>
+          <div class="stat"><span class="k">Checked</span><span id="st-checked" class="v">0</span></div>
+          <div class="stat ok"><span class="k">✅ Reg</span><span id="st-reg" class="v">0</span></div>
+          <div class="stat warn"><span class="k">⚠️ Unreg</span><span id="st-unreg" class="v">0</span></div>
+          <div class="stat err"><span class="k">❌ Invalid</span><span id="st-inv" class="v">0</span></div>
+          <div class="stat"><span class="k">📦 Valid</span><span id="st-valid" class="v">0</span></div>
+        </div>
+        <div id="bulk-latest" class="latest"></div>
+      </div>
+    </section>
 
-  <!-- ═════════════════ GENERATE ═════════════════ -->
-  <section class="panel" id="panel-generate">
-    <h2>🎲 Generate Device IDs</h2>
-    <p class="muted">Create random Android device IDs (Luhn-valid IMEI).</p>
+    <!-- BAN -->
+    <section class="panel" id="panel-ban">
+      <h2>🚫 Ban Check (single)</h2>
+      <p class="muted">Accurate PID 20001 method. 1 credit. Takes 10–25 s.</p>
+      <div class="row">
+        <input id="ban-input" class="input" placeholder="and_xxxxxxxx…"/>
+        <button id="ban-btn" class="btn primary">Check Ban</button>
+      </div>
+      <div id="ban-output" class="result"></div>
+    </section>
+
+    <!-- BAN BULK -->
+    <section class="panel" id="panel-banbulk">
+      <h2>📦 Ban Bulk</h2>
+      <p class="muted">Scan many IDs for ban status. 1 credit per ID.</p>
+      <div class="row">
+        <label class="lbl">Threads</label>
+        <input id="banbulk-threads" class="input small" type="number" value="20" min="1" max="60"/>
+      </div>
+      <textarea id="banbulk-input" class="textarea" placeholder="and_xxx&#10;and_yyy&#10;..."></textarea>
+      <div class="row">
+        <button id="banbulk-start" class="btn primary">Start Ban Scan</button>
+        <button id="banbulk-stop" class="btn danger" disabled>Stop</button>
+        <button id="banbulk-dl" class="btn ghost" disabled>Download</button>
+      </div>
+      <div id="banbulk-progress" class="progress-wrap hidden">
+        <div class="progress-bar"><div id="banbulk-bar" class="progress-fill"></div></div>
+        <div class="stats-grid">
+          <div class="stat"><span class="k">Total</span><span id="bst-total" class="v">0</span></div>
+          <div class="stat"><span class="k">Checked</span><span id="bst-checked" class="v">0</span></div>
+          <div class="stat err"><span class="k">🚫 Banned</span><span id="bst-banned" class="v">0</span></div>
+          <div class="stat ok"><span class="k">✅ Clean</span><span id="bst-clean" class="v">0</span></div>
+          <div class="stat warn"><span class="k">⚠️ Unk</span><span id="bst-unreg" class="v">0</span></div>
+          <div class="stat err"><span class="k">❌ Invalid</span><span id="bst-inv" class="v">0</span></div>
+        </div>
+        <div id="banbulk-latest" class="latest"></div>
+      </div>
+    </section>
+
+    <!-- GENERATE -->
+    <section class="panel" id="panel-generate">
+      <h2>🎲 Generate Device IDs</h2>
+      <p class="muted">Free — no credits used.</p>
+      <div class="row">
+        <label class="lbl">Count</label>
+        <input id="gen-count" class="input small" type="number" value="10" min="1" max="10000"/>
+        <button id="gen-btn" class="btn primary">Generate</button>
+        <button id="gen-copy" class="btn ghost" disabled>Copy All</button>
+      </div>
+      <pre id="gen-output" class="mono-box"></pre>
+    </section>
+
+    <!-- KICK -->
+    <section class="panel" id="panel-kick">
+      <h2>⚡ Bruteforce Kicker</h2>
+      <p class="muted">5 credits. Kicks the target session for ~1 minute (3 s delay).</p>
+      <div class="row">
+        <input id="kick-input" class="input" placeholder="and_xxxxxxxx…"/>
+        <button id="kick-start" class="btn primary">Start Kick</button>
+      </div>
+      <div id="kick-panel" class="result hidden"></div>
+    </section>
+
+    <!-- JOBS -->
+    <section class="panel" id="panel-jobs">
+      <h2>📋 My Jobs</h2>
+      <p class="muted">Recent bulk scans — click to resume monitoring or download.</p>
+      <div id="jobs-list" class="jobs"></div>
+      <div class="row">
+        <button id="jobs-refresh" class="btn ghost">↻ Refresh</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ══════════════ ADMIN VIEW ══════════════ -->
+<div id="view-admin" class="view hidden">
+  <header class="topbar">
+    <div class="brand">🛠 <b>ADMIN PANEL</b></div>
+    <div class="userbar">
+      <button class="btn small ghost" id="admin-back">← Back</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="row stats-row" id="admin-stats">
+      <div class="stat"><span class="k">👥 Users</span><span class="v" id="as-users">…</span></div>
+      <div class="stat"><span class="k">📋 Jobs</span><span class="v" id="as-jobs">…</span></div>
+      <div class="stat warn"><span class="k">⚡ Running</span><span class="v" id="as-running">…</span></div>
+      <div class="stat ok"><span class="k">💳 Credits added</span><span class="v" id="as-cadd">…</span></div>
+      <div class="stat err"><span class="k">💳 Credits used</span><span class="v" id="as-cused">…</span></div>
+    </div>
 
     <div class="row">
-      <label class="lbl">Count</label>
-      <input id="gen-count" class="input small" type="number" value="10" min="1" max="10000"/>
-      <button id="gen-btn" class="btn primary">Generate</button>
-      <button id="gen-copy" class="btn ghost" disabled>Copy All</button>
+      <input id="admin-search" class="input" placeholder="Search username…"/>
+      <button id="admin-search-btn" class="btn">Search</button>
+      <button id="admin-reload" class="btn ghost">↻ Reload</button>
     </div>
 
-    <pre id="gen-output" class="mono-box"></pre>
-  </section>
-
-  <!-- ═════════════════ KICK ═════════════════ -->
-  <section class="panel" id="panel-kick">
-    <h2>⚡ Bruteforce Kicker</h2>
-    <p class="muted">Fetches target session, then repeatedly kicks (3 s delay).</p>
-
-    <div class="row">
-      <input id="kick-input" class="input" placeholder="and_xxxxxxxx…" />
-      <button id="kick-start" class="btn primary">Start Kick</button>
-      <button id="kick-stop" class="btn danger" disabled>Stop</button>
+    <div class="admin-table-wrap">
+      <table class="admin-table" id="admin-users-table">
+        <thead>
+          <tr><th>ID</th><th>User</th><th>Credits</th><th>Admin</th><th>Banned</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="admin-users-body"></tbody>
+      </table>
     </div>
-
-    <div id="kick-panel" class="result hidden"></div>
-  </section>
-
-</main>
-
-<footer>
-  <span class="muted">MLBB Checker — local web edition</span>
-</footer>
+  </main>
+</div>
 
 <script src="/static/app.js"></script>
 </body>
-</html>
+  </html>
